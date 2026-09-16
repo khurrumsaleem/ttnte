@@ -45,6 +45,26 @@ inline ttnte::task::TaskStatus test_stream(
   }
 }
 
+/// @brief Tell the CUDA caching allocator that `stream` is also reading/
+/// writing `s`'s underlying TT-core tensors, so it won't hand their memory
+/// to an unrelated allocation on a different stream until `stream` has
+/// caught up too. Needed because task dispatch is not sticky per patch --
+/// the same State's tensors routinely get touched by a different worker's
+/// stream than the one that wrote them (solve_task writes on whichever
+/// stream drew that dispatch; a later narrow_task/apply_task/solve_task for
+/// the same patch may run on a different one), and without this the
+/// allocator only tracks the tensor's original allocating stream.
+inline void record_stream_state(
+  const ttnte::linalg::State& s, c10::Stream stream)
+{
+  if (!s.defined()) {
+    return;
+  }
+  for (const auto& core : s.as_tt().get_cores()) {
+    core.record_stream(stream);
+  }
+}
+
 } // namespace
 
 namespace ttnte::task::cuda {
@@ -194,6 +214,8 @@ Task& configure_solve_task(Task& task, const std::shared_ptr<DataType>& system,
             // Force all subsequent LibTorch ops onto this specific stream
             const auto& guard = active_stream->guard();
 
+            record_stream_state(system->get_state(), active_stream->stream);
+
             // Dispatch solve kernel
             solver->solve(system);
           }
@@ -214,6 +236,8 @@ Task& configure_solve_task(Task& task, const std::shared_ptr<DataType>& system,
       {
         // Force all subsequent LibTorch ops onto this specific stream
         const auto& guard = stream.guard();
+
+        record_stream_state(system->get_state(), stream.stream);
 
         // Dispatch the math kernels
         solver->solve(system);
@@ -332,6 +356,8 @@ inline Task& configure_apply_task(Task& task,
           // Force all subsequent LibTorch ops onto this specific stream
           const auto& guard = active_stream->guard();
 
+          record_stream_state(coupling->recv_buffer, active_stream->stream);
+
           // Make sure to apply the map
           coupling->set_recv_buffer(std::move(coupling->recv_buffer), true,
             config->eps, config->max_rank);
@@ -362,6 +388,8 @@ inline Task& configure_apply_task(Task& task,
       {
         // Force all subsequent LibTorch ops onto this specific stream
         const auto& guard = stream.guard();
+
+        record_stream_state(coupling->recv_buffer, stream.stream);
 
         // Make sure to apply the map
         coupling->set_recv_buffer(std::move(coupling->recv_buffer), true,
@@ -414,6 +442,7 @@ inline Task& configure_narrow_task(Task& task,
           // of State is a shallow shared-pointer copy; narrow_() on that copy
           // would mutate the system's live state, corrupting future iterations.
           const auto& state = system->get_state();
+          record_stream_state(state, active_stream->stream);
           const size_t boundary_dim = static_cast<size_t>(state.ndimension()) -
                                       coupling->connection.mapping.flip.size() -
                                       2 + coupling->dim;
@@ -442,6 +471,7 @@ inline Task& configure_narrow_task(Task& task,
 
         // Use narrow() (non-mutating) — same reasoning as GPU_ASYNC path.
         const auto& state = system->get_state();
+        record_stream_state(state, stream.stream);
         const size_t boundary_dim = static_cast<size_t>(state.ndimension()) -
                                     coupling->connection.mapping.flip.size() -
                                     2 + coupling->dim;

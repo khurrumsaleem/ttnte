@@ -1,4 +1,5 @@
 #include "ttnte/parallel/stream_handle.hpp"
+#include <memory>
 #include <torch/extension.h>
 
 namespace py = pybind11;
@@ -15,7 +16,10 @@ void register_StreamHandle(py::module_& m)
 
     // =================================================================
     // Public methods
-    .def("guard", [](StreamHandle& self) { return StreamGuard(self.stream); })
+    .def("guard",
+      [](StreamHandle& self) -> std::unique_ptr<StreamGuard> {
+        return std::make_unique<StreamGuard>(self.stream);
+      })
 
     // =================================================================
     // Public getters / setters
